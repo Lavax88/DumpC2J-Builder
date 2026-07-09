@@ -19,12 +19,22 @@ jobs:
       fail-fast: false
       matrix:
         hz: [powersave, balance, smooth, performance, ultra-performance]
-        root: [none, ksu-next, kowsu, sukisu] # Every root manager except resukisu
-        variant: [susfs, root]
+        root: [none, ksu-next, kowsu, sukisu] # ResukiSU is excluded
+        variant: [stock, susfs, root]
         exclude:
-          # A 'root' variant build requires a root manager, so we exclude the 'none' root manager for it.
+          # Root variants must have a root manager
           - variant: root
             root: none
+          # SUSFS variants must have a root manager (removes susfs + no root)
+          - variant: susfs
+            root: none
+          # Stock variant cannot have a root manager (only root: none is valid)
+          - variant: stock
+            root: ksu-next
+          - variant: stock
+            root: kowsu
+          - variant: stock
+            root: sukisu
 
     steps:
       - name: Checkout Builder
@@ -56,13 +66,19 @@ jobs:
           fi
           echo "HZ_ID=$HZ_ID" >> $GITHUB_ENV
 
-          # Configure variant logic natively as requested
-          if [ "$INPUT_VARIANT" == "root" ]; then
-            INPUT_NOMOUNT="on"
-          else
+          # Configure nomount and bypasscharging logic
+          if [ "$INPUT_VARIANT" == "stock" ]; then
             INPUT_NOMOUNT="off"
+          else
+            # Default for Root & SUSFS builds
+            INPUT_NOMOUNT="on"
           fi
+          
+          # Bypass Charging is ON for all builds
+          INPUT_BYPASS="on"
+          
           echo "INPUT_NOMOUNT=$INPUT_NOMOUNT" >> $GITHUB_ENV
+          echo "INPUT_BYPASS=$INPUT_BYPASS" >> $GITHUB_ENV
 
           # Set Build Name
           if [ "$INPUT_ROOT" == "none" ]; then
@@ -72,7 +88,7 @@ jobs:
           fi
 
           [ "$INPUT_NOMOUNT" == "on" ] && BUILD_NAME="${BUILD_NAME}-nomount"
-          BUILD_NAME="${BUILD_NAME}-bypasscharging" # Bypass charging is default 'ON'
+          [ "$INPUT_BYPASS" == "on" ] && BUILD_NAME="${BUILD_NAME}-bypasscharging"
 
           echo "BUILD_NAME=$BUILD_NAME" >> $GITHUB_ENV
 
@@ -133,7 +149,7 @@ jobs:
           INPUT_WIFI: "on"
           INPUT_KGSL: "on"
           INPUT_DATA: "on"
-          INPUT_BYPASS: "on"
+          INPUT_BYPASS: ${{ env.INPUT_BYPASS }}
           INPUT_DROIDSPACES: "off"
           INPUT_DEBUG: "off"
           INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
@@ -214,60 +230,95 @@ jobs:
           echo "" >> release_body.md
           echo "> [!CAUTION]" >> release_body.md
           echo "> **BACKUP your boot.img** before flashing to recover from potential bootloops or other issues." >> release_body.md
+          echo "> **Note:** Bypass charging is ON for all builds. Nomount is ON for all builds except stock." >> release_body.md
           echo "" >> release_body.md
 
           HZs=("powersave" "balance" "smooth" "performance" "ultra-performance")
-          ROOTs=("none" "ksu-next" "kowsu" "sukisu")
 
-          generate_table() {
-            local VARIANT_TITLE=$1
-            local VARIANT_LOWER=$2
-            
-            echo "### $VARIANT_TITLE" >> release_body.md
-            echo "| Variant | Powersave | Balance | Smooth | Performance | Ultra-Performance |" >> release_body.md
-            echo "|---|---|---|---|---|---|" >> release_body.md
+          # Table 1: Standard / Root Builds
+          echo "### Standard / Root Builds" >> release_body.md
+          echo "| Variant | Powersave | Balance | Smooth | Performance | Ultra-Performance |" >> release_body.md
+          echo "|---|---|---|---|---|---|" >> release_body.md
 
-            for ROOT in "${ROOTs[@]}"; do
-              if [ "$VARIANT_LOWER" == "root" ] && [ "$ROOT" == "none" ]; then
-                continue
-              fi
-
-              DISPLAY_ROOT=$ROOT
-              [ "$ROOT" == "none" ] && DISPLAY_ROOT="Stock"
+          for ROOT in "none" "ksu-next" "kowsu" "sukisu"; do
+            if [ "$ROOT" == "none" ]; then
+              VARIANT_LOWER="stock"
+              DISPLAY_ROOT="Stock"
+            else
+              VARIANT_LOWER="root"
               [ "$ROOT" == "ksu-next" ] && DISPLAY_ROOT="KernelSU Next"
               [ "$ROOT" == "kowsu" ] && DISPLAY_ROOT="KowSU"
               [ "$ROOT" == "sukisu" ] && DISPLAY_ROOT="SukiSU"
-
-              ROW="| **$DISPLAY_ROOT** |"
-              for HZ in "${HZs[@]}"; do
-                STATUS_FILE="artifacts/status-${VARIANT_LOWER}-${ROOT}-${HZ}.txt"
+            fi
+            
+            ROW="| **$DISPLAY_ROOT** |"
+            for HZ in "${HZs[@]}"; do
+              STATUS_FILE="artifacts/status-${VARIANT_LOWER}-${ROOT}-${HZ}.txt"
+              
+              if grep -q "success" "$STATUS_FILE" 2>/dev/null; then
+                FILE_PREFIX="${VARIANT_LOWER}"
+                [ "$ROOT" != "none" ] && FILE_PREFIX="${FILE_PREFIX}-${ROOT}"
+                FILE_PREFIX="${FILE_PREFIX}-${HZ}"
                 
-                if grep -q "success" "$STATUS_FILE" 2>/dev/null; then
-                  # Determine file prefix to link zip specifically
-                  FILE_PREFIX="${VARIANT_LOWER}"
-                  [ "$ROOT" != "none" ] && FILE_PREFIX="${FILE_PREFIX}-${ROOT}"
-                  FILE_PREFIX="${FILE_PREFIX}-${HZ}"
-                  [ "$VARIANT_LOWER" == "root" ] && FILE_PREFIX="${FILE_PREFIX}-nomount"
-                  
-                  ZIP_FILE=$(find release_assets -type f -name "*${FILE_PREFIX}*.zip" -printf "%f\n" | head -n 1)
-                  
-                  if [ -n "$ZIP_FILE" ]; then
-                    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ZIP_FILE}"
-                    ROW="$ROW [${FILE_PREFIX}](${DOWNLOAD_URL}) |"
-                  else
-                    ROW="$ROW ✅ Passed |"
-                  fi
+                # Dynamic suffix mapping
+                if [ "$VARIANT_LOWER" == "stock" ]; then
+                  FILE_PREFIX="${FILE_PREFIX}-bypasscharging"
                 else
-                  ROW="$ROW ❌ Failed |"
+                  FILE_PREFIX="${FILE_PREFIX}-nomount-bypasscharging"
                 fi
-              done
-              echo "$ROW" >> release_body.md
+                
+                ZIP_FILE=$(find release_assets -type f -name "*${FILE_PREFIX}*.zip" -printf "%f\n" | head -n 1)
+                
+                if [ -n "$ZIP_FILE" ]; then
+                  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ZIP_FILE}"
+                  LINK_TEXT="${ZIP_FILE%.zip}"
+                  LINK_TEXT="${LINK_TEXT#DumpC2J-}"
+                  ROW="$ROW [${LINK_TEXT}](${DOWNLOAD_URL}) |"
+                else
+                  ROW="$ROW ✅ Passed |"
+                fi
+              else
+                ROW="$ROW ❌ Failed |"
+              fi
             done
-            echo "" >> release_body.md
-          }
+            echo "$ROW" >> release_body.md
+          done
+          echo "" >> release_body.md
 
-          generate_table "Standard / Root Builds" "root"
-          generate_table "SUSFS 💦" "susfs"
+          # Table 2: SUSFS
+          echo "### SUSFS 💦" >> release_body.md
+          echo "| Variant | Powersave | Balance | Smooth | Performance | Ultra-Performance |" >> release_body.md
+          echo "|---|---|---|---|---|---|" >> release_body.md
+
+          for ROOT in "ksu-next" "kowsu" "sukisu"; do
+            VARIANT_LOWER="susfs"
+            [ "$ROOT" == "ksu-next" ] && DISPLAY_ROOT="KernelSU Next"
+            [ "$ROOT" == "kowsu" ] && DISPLAY_ROOT="KowSU"
+            [ "$ROOT" == "sukisu" ] && DISPLAY_ROOT="SukiSU"
+            
+            ROW="| **$DISPLAY_ROOT** |"
+            for HZ in "${HZs[@]}"; do
+              STATUS_FILE="artifacts/status-${VARIANT_LOWER}-${ROOT}-${HZ}.txt"
+              
+              if grep -q "success" "$STATUS_FILE" 2>/dev/null; then
+                FILE_PREFIX="${VARIANT_LOWER}-${ROOT}-${HZ}-nomount-bypasscharging"
+                
+                ZIP_FILE=$(find release_assets -type f -name "*${FILE_PREFIX}*.zip" -printf "%f\n" | head -n 1)
+                
+                if [ -n "$ZIP_FILE" ]; then
+                  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ZIP_FILE}"
+                  LINK_TEXT="${ZIP_FILE%.zip}"
+                  LINK_TEXT="${LINK_TEXT#DumpC2J-}"
+                  ROW="$ROW [${LINK_TEXT}](${DOWNLOAD_URL}) |"
+                else
+                  ROW="$ROW ✅ Passed |"
+                fi
+              else
+                ROW="$ROW ❌ Failed |"
+              fi
+            done
+            echo "$ROW" >> release_body.md
+          done
           EOF
           bash gen_table.sh
 
