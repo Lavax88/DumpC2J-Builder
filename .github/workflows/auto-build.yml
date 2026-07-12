@@ -142,7 +142,7 @@ jobs:
           body: |
             ### 🛠️ Build Configuration
             - **Variant:** Root (SukiSU)
-            - **Refresh Rate:** Smooth (300 HZ)
+            - **Refresh Rate:** Ultra-Perfomance (1000 HZ)
             - **Clang Toolchain:** ZyClang
             - **Mods Enabled:** Bypass Charging, NoMount
             
