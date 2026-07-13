@@ -11,7 +11,7 @@ env:
 
 jobs:
   build:
-    name: "Auto Build (SukiSU / Ultra-Performance / SUSFS / ZyClang)"
+    name: "Auto Build (SukiSU / Smooth / SUSFS / ZyClang)"
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -32,9 +32,9 @@ jobs:
 
       - name: Setup Hardcoded Environment Variables
         run: |
-          echo "HZ_ID=1000" >> $GITHUB_ENV
+          echo "HZ_ID=300" >> $GITHUB_ENV
           echo "ACTUAL_ROOT=sukisu" >> $GITHUB_ENV
-          echo "BUILD_NAME=susfs-sukisu-ultra-performance-bypasscharging-nomount" >> $GITHUB_ENV
+          echo "BUILD_NAME=susfs-sukisu-smooth-bypasscharging-nomount" >> $GITHUB_ENV
 
       - name: Create Swap
         run: |
@@ -84,7 +84,7 @@ jobs:
 
       - name: Build Kernel
         env:
-          INPUT_HZ: "ultra-performance"
+          INPUT_HZ: "smooth"
           INPUT_VARIANT: "susfs"
           INPUT_ROOT: "sukisu"
           INPUT_LTO: "full"
@@ -142,7 +142,7 @@ jobs:
           body: |
             ### 🛠️ Build Configuration
             - **Variant:** SUSFS (SukiSU)
-            - **Refresh Rate:** Ultra-Performance (1000 HZ)
+            - **Refresh Rate:** Smooth (300 HZ)
             - **Clang Toolchain:** ZyClang
             - **Mods Enabled:** Bypass Charging, NoMount, Spoof Uname
             
