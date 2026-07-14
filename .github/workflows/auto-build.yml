@@ -10,8 +10,37 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
-    name: "Auto Build (SukiSU / Smooth / SUSFS / ZyClang)"
+  check_upstream:
+    name: "Check Upstream Updates"
+    runs-on: ubuntu-latest
+    outputs:
+      update_found: ${{ steps.check.outputs.has_update }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Upstream Checker
+        id: check
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Run the existing upstream check script and capture the output
+          output=$(bash scripts/upstream_check.sh)
+          echo "$output"
+          
+          # The script outputs "Notified: X update(s)." when it finds something new
+          if echo "$output" | grep -q "Notified:"; then
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test_build:
+    name: "Test Build (SukiSU / Smooth / SUSFS / Neutron)"
+    needs: check_upstream
+    # Only run the test build if upstream updates were actually found
+    if: needs.check_upstream.outputs.update_found == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -58,9 +87,110 @@ jobs:
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 clang lld llvm jq
 
-      - name: Setup Clang (ZyClang)
+      - name: Setup Clang (Neutron)
         run: |
-          bash builder/scripts/setup_clang.sh zyc
+          bash builder/scripts/setup_clang.sh neutron
+
+      - name: Setup AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          cp kernel-source/anykernel/anykernel.sh anykernel/anykernel.sh
+          cp -r kernel-source/anykernel/tools/* anykernel/tools/
+
+      - name: Scout Checkpoint
+        env:
+          ROOT: "sukisu"
+          VARIANT: "susfs"
+          RUN_MODE: "Test"
+        run: bash builder/scripts/scout.sh
+
+      - name: Setup ccache
+        env:
+          ACTUAL_ROOT: "sukisu"
+          CLANG_VARIANT: "neutron"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_setup.sh
+
+      - name: Build Kernel
+        env:
+          INPUT_HZ: "smooth"
+          INPUT_VARIANT: "susfs"
+          INPUT_ROOT: "sukisu"
+          INPUT_LTO: "full"
+          INPUT_HARDENED: "off"
+          INPUT_HTSR: "on"
+          INPUT_WIFI: "on"
+          INPUT_KGSL: "on"
+          INPUT_DATA: "on"
+          INPUT_BYPASS: "on"
+          INPUT_DROIDSPACES: "off"
+          INPUT_DEBUG: "off"
+          INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
+          INPUT_SPOOF_UNAME: "on"
+          INPUT_VERSION_SPOOF: ""
+          INPUT_NOMOUNT: "on"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          bash builder/scripts/build.sh
+
+      - name: Save ccache
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_save.sh
+
+  release_build:
+    name: "Release Build (SukiSU / Smooth / SUSFS / Neutron)"
+    needs: test_build # Implicitly waits for test_build to SUCCEED
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          fetch-depth: 0
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=50 \
+            --branch main \
+            https://${{ secrets.GH_TOKEN }}@github.com/adennnqt/DumpC2J-Kernel \
+            kernel-source
+
+      - name: Setup Hardcoded Environment Variables
+        run: |
+          echo "HZ_ID=300" >> $GITHUB_ENV
+          echo "ACTUAL_ROOT=sukisu" >> $GITHUB_ENV
+          echo "BUILD_NAME=susfs-sukisu-smooth-bypasscharging-nomount" >> $GITHUB_ENV
+
+      - name: Create Swap
+        run: |
+          SWAPFILE="/mnt/build_swapfile"
+          while true; do
+            if sudo fallocate -l 10G $SWAPFILE || sudo dd if=/dev/zero of=$SWAPFILE bs=1M count=10240 status=progress; then
+              break
+            else
+              sleep 5
+            fi
+          done
+          sudo chmod 600 $SWAPFILE && sudo mkswap $SWAPFILE && sudo swapon $SWAPFILE
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses-dev lib32readline-dev lib32z1-dev libncurses-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 clang lld llvm jq
+
+      - name: Setup Clang (Neutron)
+        run: |
+          bash builder/scripts/setup_clang.sh neutron
 
       - name: Setup AnyKernel3
         run: |
@@ -78,7 +208,7 @@ jobs:
       - name: Setup ccache
         env:
           ACTUAL_ROOT: "sukisu"
-          CLANG_VARIANT: "zyc"
+          CLANG_VARIANT: "neutron"
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: bash builder/scripts/lib/ccache_setup.sh
 
@@ -118,7 +248,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs: release_build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -143,7 +273,7 @@ jobs:
             ### 🛠️ Build Configuration
             - **Variant:** SUSFS (SukiSU)
             - **Refresh Rate:** Smooth (300 HZ)
-            - **Clang Toolchain:** ZyClang
+            - **Clang Toolchain:** Neutron
             - **Mods Enabled:** Bypass Charging, NoMount, Spoof Uname
             
             > [!CAUTION]
