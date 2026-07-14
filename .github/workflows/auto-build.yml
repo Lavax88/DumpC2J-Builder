@@ -21,14 +21,13 @@ jobs:
 
       - name: Run Upstream Checker
         id: check
-        # Telegram env vars have been removed here
         run: |
           # Run the existing upstream check script and capture the output
           output=$(bash scripts/upstream_check.sh)
           echo "$output"
           
-          # The script outputs "Notified: X update(s)." when it finds something new
-          if echo "$output" | grep -q "Notified:"; then
+          # The script outputs "[+]" when it finds a new update
+          if echo "$output" | grep -Fq "[+]"; then
             echo "has_update=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_update=false" >> "$GITHUB_OUTPUT"
