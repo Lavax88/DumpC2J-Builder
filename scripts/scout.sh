@@ -8,6 +8,7 @@ MANIFEST="${BUILDER_DIR}/scripts/checkpoint/manifest.json"
 [ -f "$MANIFEST" ] || error "scout: manifest.json not found at ${MANIFEST}"
 
 RUN_MODE="${RUN_MODE:-Test}"
+CANDIDATE_CLAIMED="false"
 
 latest_sha_or_empty() {
     local label="$1" url="$2" jq_filter="$3"
@@ -57,13 +58,36 @@ resolve_component() {
             if [ -n "$good" ]; then
                 ref="$good"; candidate="false"
                 warn "${prefix}: latest ${latest:0:12} known-bad — fallback ke pinned ${good:0:12}"
+            elif [ "$CANDIDATE_CLAIMED" = "true" ]; then
+                ref=""; candidate="false"
+                warn "${prefix}: known-bad, belum ada pin, & slot candidate run ini udah kepake komponen lain — skip komponen ini, tidak checkout apapun"
+                echo "SKIP_${prefix}=true" >> "$GITHUB_ENV"
+                echo "${prefix}_REF=${ref}" >> "$GITHUB_ENV"
+                echo "CANDIDATE_${prefix}=${candidate}" >> "$GITHUB_ENV"
+                return 0
             else
                 ref="$latest"; candidate="true"
+                CANDIDATE_CLAIMED="true"
                 warn "${prefix}: latest ${latest:0:12} known-bad & belum ada pin — retry sbg last-resort candidate"
             fi
         else
-            ref="$latest"; candidate="true"
-            log "${prefix}: candidate baru ${latest:0:12} (pinned: ${good:-none})"
+            if [ "$CANDIDATE_CLAIMED" = "true" ]; then
+                if [ -n "$good" ]; then
+                    ref="$good"; candidate="false"
+                    log "${prefix}: candidate baru ${latest:0:12} terdeteksi tapi ditunda — komponen lain lagi diuji run ini, pinned ${good:0:12} dulu"
+                else
+                    ref=""; candidate="false"
+                    warn "${prefix}: candidate baru ${latest:0:12} terdeteksi tapi ditunda, dan belum ada pin sama sekali — skip komponen ini run ini"
+                    echo "SKIP_${prefix}=true" >> "$GITHUB_ENV"
+                    echo "${prefix}_REF=${ref}" >> "$GITHUB_ENV"
+                    echo "CANDIDATE_${prefix}=${candidate}" >> "$GITHUB_ENV"
+                    return 0
+                fi
+            else
+                ref="$latest"; candidate="true"
+                CANDIDATE_CLAIMED="true"
+                log "${prefix}: candidate baru ${latest:0:12} (pinned: ${good:-none})"
+            fi
         fi
     fi
 
