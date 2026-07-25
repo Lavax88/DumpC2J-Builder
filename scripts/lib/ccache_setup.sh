@@ -23,7 +23,7 @@ mkdir -p "$CCACHE_DIR"
 # (and evicted each other from) one bucket.
 CCACHE_ASSET="ccache-${CLANG_VARIANT}-lto-${LTO:-full}.tar.zst"
 CCACHE_TAG="ccache-store"
-CCACHE_REPO="adennnqt/DumpC2J-Builder"
+CCACHE_REPO="${GITHUB_REPOSITORY:-adennnqt/DumpC2J-Builder}"
 
 echo "[+] ccache asset target: ${CCACHE_ASSET}"
 

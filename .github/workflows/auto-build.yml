@@ -1,0 +1,385 @@
+name: Automated Daily Build & Release
+
+on:
+  schedule:
+    # 12:00 PM IST (UTC+5:30) is 06:30 UTC
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  upstream_check:
+    name: "Check Upstream Updates"
+    runs-on: ubuntu-latest
+    outputs:
+      has_updates: ${{ steps.check.outputs.has_updates }}
+    steps:
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+
+      - name: Check Upstream Updates (ReSukiSU & SUSFS)
+        id: check
+        run: |
+          MANIFEST="scripts/checkpoint/manifest.json"
+          [ -f "$MANIFEST" ] || { echo "manifest.json not found"; exit 1; }
+
+          SOURCES=(
+            "resukisu_susfs|ReSukiSU (susfs)|https://api.github.com/repos/ReSukiSU/ReSukiSU/commits/main|.sha"
+            "susfs4ksu|SUSFS4KSU (simon)|https://gitlab.com/api/v4/projects/simonpunk%2Fsusfs4ksu/repository/commits/gki-android15-6.6-dev|.id"
+          )
+
+          UPDATES=()
+
+          for entry in "${SOURCES[@]}"; do
+            IFS='|' read -r key label url filter <<< "$entry"
+            good=$(jq -r ".${key}.good // \"\"" "$MANIFEST")
+
+            body_file=$(mktemp)
+            http_code=$(curl -sL -o "$body_file" -w '%{http_code}' --max-time 20 "$url") || http_code="000"
+            if [ "$http_code" != "200" ]; then
+              echo "[!] $label: failed to fetch upstream (HTTP $http_code) — skip"
+              rm -f "$body_file"; continue
+            fi
+
+            latest=$(jq -r "$filter" "$body_file" 2>/dev/null)
+            rm -f "$body_file"
+
+            if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+              echo "[!] $label: failed to parse sha — skip"; continue
+            fi
+            if [ -z "$good" ]; then
+              echo "[i] $label: no pin yet — skip (first run)"; continue
+            fi
+
+            if [ "$latest" != "$good" ]; then
+              echo "[+] $label: ${good:0:8} -> ${latest:0:8}"
+              UPDATES+=("${label}: ${good:0:8} -> ${latest:0:8}")
+            else
+              echo "[=] $label: up to date"
+            fi
+          done
+
+          if [ "${#UPDATES[@]}" -eq 0 ]; then
+            echo "No updates found for ReSukiSU or SUSFS."
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Updates detected: ${#UPDATES[@]}"
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test_build:
+    name: "Test Build (Runmode: Test)"
+    needs: upstream_check
+    if: needs.upstream_check.outputs.has_updates == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          fetch-depth: 0
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=50 \
+            --branch main \
+            https://${{ secrets.GH_TOKEN }}@github.com/adennnqt/DumpC2J-Kernel \
+            kernel-source
+
+      - name: Parse Inputs
+        id: setup_vars
+        env:
+          INPUT_HZ: "smooth"
+          INPUT_VARIANT: "susfs"
+          INPUT_ROOT: "resukisu"
+          INPUT_HARDENED: "off"
+          INPUT_BYPASS: "on"
+          INPUT_DROIDSPACES: "off"
+          INPUT_HTSR: "on"
+          INPUT_WIFI: "on"
+          INPUT_KGSL: "on"
+          INPUT_DATA: "on"
+          INPUT_DEBUG: "off"
+          INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
+          INPUT_SPOOF_UNAME: "on"
+          INPUT_NOMOUNT: "on"
+        run: |
+          echo "HZ_ID=300" >> $GITHUB_ENV
+          echo "ACTUAL_ROOT=resukisu" >> $GITHUB_ENV
+          BUILD_NAME="susfs-resukisu-smooth-bypasscharging-nomount"
+          echo "BUILD_NAME=$BUILD_NAME" >> $GITHUB_ENV
+
+      - name: Create Swap
+        run: |
+          SWAPFILE="/mnt/build_swapfile"
+          while true; do
+            if sudo fallocate -l 10G $SWAPFILE || sudo dd if=/dev/zero of=$SWAPFILE bs=1M count=10240 status=progress; then
+              break
+            else
+              sleep 5
+            fi
+          done
+          sudo chmod 600 $SWAPFILE && sudo mkswap $SWAPFILE && sudo swapon $SWAPFILE
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses-dev lib32readline-dev lib32z1-dev libncurses-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 clang lld llvm jq
+
+      - name: Setup Clang
+        run: |
+          bash builder/scripts/setup_clang.sh neutron
+
+      - name: Setup AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          cp kernel-source/anykernel/anykernel.sh anykernel/anykernel.sh
+          cp -r kernel-source/anykernel/tools/* anykernel/tools/
+
+      - name: Scout Checkpoint
+        env:
+          ROOT: resukisu
+          VARIANT: susfs
+          RUN_MODE: Test
+        run: bash builder/scripts/scout.sh
+
+      - name: Setup ccache
+        env:
+          ACTUAL_ROOT: resukisu
+          CLANG_VARIANT: neutron
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_setup.sh
+
+      - name: Build Kernel (Test)
+        env:
+          INPUT_HZ: "smooth"
+          INPUT_VARIANT: "susfs"
+          INPUT_ROOT: "resukisu"
+          INPUT_LTO: "full"
+          INPUT_HARDENED: "off"
+          INPUT_HTSR: "on"
+          INPUT_WIFI: "on"
+          INPUT_KGSL: "on"
+          INPUT_DATA: "on"
+          INPUT_BYPASS: "on"
+          INPUT_DROIDSPACES: "off"
+          INPUT_DEBUG: "off"
+          INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
+          INPUT_SPOOF_UNAME: "on"
+          INPUT_VERSION_SPOOF: ""
+          INPUT_NOMOUNT: "on"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          bash builder/scripts/build.sh
+
+      - name: Save ccache
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_save.sh
+
+  release_build:
+    name: "Release Build (Runmode: Release)"
+    needs: [upstream_check, test_build]
+    if: needs.upstream_check.outputs.has_updates == 'true' && needs.test_build.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      resukisu_sha: ${{ steps.info.outputs.resukisu_sha }}
+      susfs_sha: ${{ steps.info.outputs.susfs_sha }}
+
+    steps:
+      - name: Checkout Builder (Updated Main)
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          ref: main
+          fetch-depth: 0
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=50 \
+            --branch main \
+            https://${{ secrets.GH_TOKEN }}@github.com/adennnqt/DumpC2J-Kernel \
+            kernel-source
+
+      - name: Parse Inputs
+        id: setup_vars
+        env:
+          INPUT_HZ: "smooth"
+          INPUT_VARIANT: "susfs"
+          INPUT_ROOT: "resukisu"
+          INPUT_HARDENED: "off"
+          INPUT_BYPASS: "on"
+          INPUT_DROIDSPACES: "off"
+          INPUT_HTSR: "on"
+          INPUT_WIFI: "on"
+          INPUT_KGSL: "on"
+          INPUT_DATA: "on"
+          INPUT_DEBUG: "off"
+          INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
+          INPUT_SPOOF_UNAME: "on"
+          INPUT_NOMOUNT: "on"
+        run: |
+          echo "HZ_ID=300" >> $GITHUB_ENV
+          echo "ACTUAL_ROOT=resukisu" >> $GITHUB_ENV
+          BUILD_NAME="susfs-resukisu-smooth-bypasscharging-nomount"
+          echo "BUILD_NAME=$BUILD_NAME" >> $GITHUB_ENV
+
+      - name: Create Swap
+        run: |
+          SWAPFILE="/mnt/build_swapfile"
+          while true; do
+            if sudo fallocate -l 10G $SWAPFILE || sudo dd if=/dev/zero of=$SWAPFILE bs=1M count=10240 status=progress; then
+              break
+            else
+              sleep 5
+            fi
+          done
+          sudo chmod 600 $SWAPFILE && sudo mkswap $SWAPFILE && sudo swapon $SWAPFILE
+
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses-dev lib32readline-dev lib32z1-dev libncurses-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 clang lld llvm jq
+
+      - name: Setup Clang
+        run: |
+          bash builder/scripts/setup_clang.sh neutron
+
+      - name: Setup AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          cp kernel-source/anykernel/anykernel.sh anykernel/anykernel.sh
+          cp -r kernel-source/anykernel/tools/* anykernel/tools/
+
+      - name: Scout Checkpoint
+        env:
+          ROOT: resukisu
+          VARIANT: susfs
+          RUN_MODE: Release
+        run: bash builder/scripts/scout.sh
+
+      - name: Setup ccache
+        env:
+          ACTUAL_ROOT: resukisu
+          CLANG_VARIANT: neutron
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_setup.sh
+
+      - name: Build Kernel (Release)
+        env:
+          INPUT_HZ: "smooth"
+          INPUT_VARIANT: "susfs"
+          INPUT_ROOT: "resukisu"
+          INPUT_LTO: "full"
+          INPUT_HARDENED: "off"
+          INPUT_HTSR: "on"
+          INPUT_WIFI: "on"
+          INPUT_KGSL: "on"
+          INPUT_DATA: "on"
+          INPUT_BYPASS: "on"
+          INPUT_DROIDSPACES: "off"
+          INPUT_DEBUG: "off"
+          INPUT_KERNEL_NAME: "-anykern3-11-DumpC2J"
+          INPUT_SPOOF_UNAME: "on"
+          INPUT_VERSION_SPOOF: ""
+          INPUT_NOMOUNT: "on"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          bash builder/scripts/build.sh
+
+      - name: Save ccache
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash builder/scripts/lib/ccache_save.sh
+
+      - name: Extract Build Output Info
+        id: info
+        run: |
+          RES_SHA=$(jq -r '.resukisu_susfs.good // "unknown"' builder/scripts/checkpoint/manifest.json)
+          SUS_SHA=$(jq -r '.susfs4ksu.good // "unknown"' builder/scripts/checkpoint/manifest.json)
+          echo "resukisu_sha=$RES_SHA" >> "$GITHUB_OUTPUT"
+          echo "susfs_sha=$SUS_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DumpC2J-Release-Zip
+          path: kernel-source/DumpC2J-Release/*.zip
+          retention-days: 7
+
+  create_release:
+    name: "Create GitHub Release"
+    needs: [upstream_check, test_build, release_build]
+    if: needs.upstream_check.outputs.has_updates == 'true' && needs.test_build.result == 'success' && needs.release_build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DumpC2J-Release-Zip
+          path: release_files
+
+      - name: Create Release Notes & Publish
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          RESUKISU_SHA: ${{ needs.release_build.outputs.resukisu_sha }}
+          SUSFS_SHA: ${{ needs.release_build.outputs.susfs_sha }}
+        run: |
+          TAG_NAME="dumpc2j-auto-$(date +'%Y%m%d-%H%M')"
+
+          cat << 'EOF' > release_notes.md
+          ### DumpC2J Daily Automated Kernel Release
+
+          > [!IMPORTANT]
+          > **Build Settings & Configuration Summary**
+
+          | Setting | Configured Value |
+          | :--- | :--- |
+          | **Spoof Uname** | `ON` |
+          | **Compiler Toolchain** | `Neutron Clang` |
+          | **Refresh Rate (HZ)** | `Smooth (300 Hz)` |
+          | **Build Variant** | `SUSFS` |
+          | **Root Method** | `ReSukiSU` |
+          | **LTO Mode** | `Full` |
+          | **Bypass Charging** | `ON` |
+          | **NoMount (VFS)** | `ON` |
+
+          ---
+
+          ### Upstream Component Versions
+
+          EOF
+
+          echo "- **ReSukiSU Version/Commit**: \`${RESUKISU_SHA}\` ([View Commit](https://github.com/ReSukiSU/ReSukiSU/commit/${RESUKISU_SHA}))" >> release_notes.md
+          echo "- **SUSFS4KSU Commit**: \`${SUSFS_SHA}\` ([View Commit](https://gitlab.com/simonpunk/susfs4ksu/-/commit/${SUSFS_SHA}))" >> release_notes.md
+          echo "- **Build Timestamp**: \`$(date -u '+%Y-%m-%d %H:%M:%S UTC')\`" >> release_notes.md
+
+          gh release create "$TAG_NAME" release_files/*.zip \
+            -R "$GITHUB_REPOSITORY" \
+            --title "DumpC2J Daily Release ($TAG_NAME)" \
+            --notes-file release_notes.md
